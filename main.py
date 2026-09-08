@@ -30,6 +30,8 @@ TARGET_URL = "https://openworld.eu.org/createvps"
 CN_TZ = timezone(timedelta(hours=8))
 REQUEST_TIMEOUT = 25
 MAX_RETRIES = 3
+LOOP_INTERVAL = int(os.environ.get("LOOP_INTERVAL", "15"))       # 每次检测间隔（秒）
+MAX_RUN_SECONDS = int(os.environ.get("MAX_RUN_SECONDS", "270"))  # 单次任务最大运行时间（秒，4.5分钟）
 
 
 def cn_time() -> str:
@@ -285,60 +287,68 @@ def main():
     if proxy_server:
         log(f"已配置自定义代理 PROXY_SERVER: {proxy_server}")
 
-    # 2. 请求页面
-    status_code, final_url, html_content = fetch_page(cookies, proxy=proxy_server)
-    if status_code == 0 or not html_content:
-        log("❌ 请求目标页面失败，终止运行")
-        sys.exit(1)
+    run_once = ("--once" in sys.argv) or (os.environ.get("RUN_ONCE", "").lower() in ("1", "true", "yes"))
+    start_time = time.time()
+    round_count = 0
 
-    # 3. 登录有效性检测
-    # 若跳转到 /login 或页面未授权
-    if "/login" in final_url.lower() or ("login" in html_content.lower() and "plan-card" not in html_content):
-        log("⚠️ 检测到重定向至登录页或未授权状态，Session Cookie 可能已过期！")
-        notify_text = (
-            f"⚠️ <b>【OpenWorld 监控报警】Session Cookie 已失效！</b>\n\n"
-            f"监控检测到当前 Cookie 无法访问控制台（已重定向到登录页面）。\n"
-            f"请重新登录 OpenWorld 获取新的 <code>sessioncookie</code>，并在 GitHub 仓库 Secrets 中更新 <code>OPENWORLD_COOKIE</code>。\n\n"
-            f"⏰ 时间: {cn_time()}"
-        )
-        send_tg_message(tg_token, tg_chat_id, notify_text, proxy=proxy_server)
-        sys.exit(1)
-
-    log(f"页面请求成功 (HTTP {status_code})，开始解析套餐库存...")
-
-    # 4. 套餐库存解析
-    plans = parse_plans(html_content)
-    if not plans:
-        log("⚠️ 未在页面中找到任何套餐信息，请检查页面结构是否变动！")
-        sys.exit(1)
-
-    log(f"成功解析到 {len(plans)} 个套餐:")
-    free_plan: Optional[Dict[str, Any]] = None
-
-    for p in plans:
-        name = str(p.get("name", ""))
-        stock = p.get("stock", 0)
-        price = p.get("price", "N/A")
-        log(f"  - 套餐: {name:<12} | 价格: {str(price):<8} | 库存: {stock}")
-
-        # 识别 Free 套餐
-        if name.strip().lower() == "free":
-            free_plan = p
-
-    # 5. 结果判断与通知
-    if not free_plan:
-        log("⚠️ 未找到名为 'Free' 的套餐！")
-        return
-
-    free_stock = int(free_plan.get("stock", 0))
-    log(f"👉 免费套餐 (Free) 当前库存: {free_stock}")
-
-    if free_stock > 0:
-        log(f"🎉 发现 Free 套餐有货！当前库存: {free_stock}，正在发送 Telegram 通知...")
-        msg = format_success_message(free_plan)
-        send_tg_message(tg_token, tg_chat_id, msg, proxy=proxy_server)
+    if run_once:
+        log("模式: 单次执行模式")
     else:
-        log("💤 Free 套餐暂无可用资源 (库存为 0)，保持静默，不发送任何通知。")
+        log(f"🚀 启动无缝高频监控模式：每 {LOOP_INTERVAL} 秒检测一次，单次最多运行 {MAX_RUN_SECONDS} 秒")
+
+    while True:
+        round_count += 1
+        elapsed = int(time.time() - start_time)
+        log(f"--- [轮次 #{round_count}] 已运行 {elapsed} 秒 ---")
+
+        # 2. 请求页面
+        status_code, final_url, html_content = fetch_page(cookies, proxy=proxy_server)
+        if status_code == 0 or not html_content:
+            log("⚠️ 请求目标页面失败，将在下个周期重试...")
+        elif "/login" in final_url.lower() or ("login" in html_content.lower() and "plan-card" not in html_content):
+            log("⚠️ 检测到重定向至登录页或未授权状态，Session Cookie 可能已过期！")
+            notify_text = (
+                f"⚠️ <b>【OpenWorld 监控报警】Session Cookie 已失效！</b>\n\n"
+                f"监控检测到当前 Cookie 无法访问控制台（已重定向到登录页面）。\n"
+                f"请重新登录 OpenWorld 获取新的 <code>sessioncookie</code>，并在 GitHub 仓库 Secrets 中更新 <code>OPENWORLD_COOKIE</code>。\n\n"
+                f"⏰ 时间: {cn_time()}"
+            )
+            send_tg_message(tg_token, tg_chat_id, notify_text, proxy=proxy_server)
+            sys.exit(1)
+        else:
+            # 3. 套餐库存解析
+            plans = parse_plans(html_content)
+            if not plans:
+                log("⚠️ 未在页面中找到任何套餐信息，请检查页面结构是否变动！")
+            else:
+                free_plan: Optional[Dict[str, Any]] = None
+                for p in plans:
+                    if str(p.get("name", "")).strip().lower() == "free":
+                        free_plan = p
+                        break
+
+                if free_plan:
+                    free_stock = int(free_plan.get("stock", 0))
+                    if free_stock > 0:
+                        log(f"🎉 发现 Free 套餐有货！当前库存: {free_stock}，正在发送 Telegram 抢购通知...")
+                        msg = format_success_message(free_plan)
+                        send_tg_message(tg_token, tg_chat_id, msg, proxy=proxy_server)
+                        log("✅ 已成功发送抢购通知！为防止重复轰炸，本次任务正常退出。")
+                        sys.exit(0)
+                    else:
+                        log(f"💤 Free 套餐暂无可用资源 (库存: {free_stock})，保持静默。")
+                else:
+                    log("⚠️ 未找到名为 'Free' 的套餐！")
+
+        if run_once:
+            break
+
+        # 检查是否接近单次任务最大运行时间（预留缓冲）
+        if (time.time() - start_time) + LOOP_INTERVAL >= MAX_RUN_SECONDS:
+            log(f"⏰ 单次任务已运行满 {int(time.time() - start_time)} 秒，正常退出，无缝交接给下一个 5 分钟定时器！")
+            break
+
+        time.sleep(LOOP_INTERVAL)
 
     log("监控任务完成，正常退出。")
 

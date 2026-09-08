@@ -3,12 +3,16 @@ name: OpenWorld 免费 VPS 库存监控
 on:
   workflow_dispatch:
   schedule:
-    # 默认每 15 分钟检测一次（可按需自行调整，如 '*/10 * * * *' 或 '*/30 * * * *'）
-    - cron: '*/15 * * * *'
+    # 每 5 分钟触发一次，配合脚本内部 4.5 分钟循环（每 15 秒一次），实现 24 小时无缝轮询
+    - cron: '*/5 * * * *'
+
+concurrency:
+  group: openworld-monitor
+  cancel-in-progress: true
 
 jobs:
   monitor:
-    name: 检测 VPS 库存
+    name: 15秒高频监控
     runs-on: ubuntu-latest
     permissions:
       contents: read
