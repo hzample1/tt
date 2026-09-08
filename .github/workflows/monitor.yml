@@ -1,0 +1,51 @@
+name: OpenWorld 免费 VPS 库存监控
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 默认每 15 分钟检测一次（可按需自行调整，如 '*/10 * * * *' 或 '*/30 * * * *'）
+    - cron: '*/15 * * * *'
+
+jobs:
+  monitor:
+    name: 检测 VPS 库存
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Set up WARP
+        uses: fscarmen/warp-on-actions@v1.1
+
+      - name: 执行监控脚本
+        env:
+          OPENWORLD_COOKIE: ${{ secrets.OPENWORLD_COOKIE }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+        run: |
+          python main.py
+
+      - name: 清理历史运行记录
+        if: always()
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          delete_workflow_pattern: ${{ github.workflow }}
+          retain_days: 1
+          keep_minimum_runs: 3
