@@ -30,12 +30,25 @@ jobs:
       - name: 安装系统依赖与 Python 库
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb jq
           python -m pip install --upgrade pip
           pip install seleniumbase requests beautifulsoup4 pyvirtualdisplay
 
-      - name: 启动 Cloudflare WARP (优化出口 IP)
-        uses: fscarmen/warp-on-actions@v1.1
+      - name: 设置代理
+        env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          chmod +x setup_proxy.sh
+          if ! bash setup_proxy.sh; then
+            echo "❌ 代理设置失败，发送通知..."
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TG_CHAT_ID}" \
+              -d text="❌ NexioHost 监控失败：代理不可用" \
+              --max-time 10 || true
+            exit 1
+          fi
 
       - name: 执行监控脚本
         env:
@@ -44,6 +57,7 @@ jobs:
           RUN_ONCE: "true" # 开启单次诊断模式，输出控制台日志后退出
           LOOP_INTERVAL: "20"
           MAX_RUN_SECONDS: "3540"
+          PROXY_SERVER: ${{ env.PROXY_SERVER }}    # 由 setup_proxy.sh 写入
         run: |
           python monitor_nexiohost.py
 
