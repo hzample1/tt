@@ -225,17 +225,53 @@ def is_cloudflare_interstitial(sb) -> bool:
 
 def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
     """
-    完全参考 demo.py 的过盾逻辑：
-    1. 尝试 uc_gui_click_captcha() 并等待
-    2. 如果失败则重试
-    3. 如果多次重试失败，则刷新页面
+    针对 billing.nexiohost.in 的特殊过盾逻辑：
+    由于该站点的 Turnstile 位于 Shadow DOM 且非居中，原生的 uc_gui_click_captcha 
+    会因为找不到 iframe 而默认点击屏幕正中心，导致完美避开复选框。
+    这里使用自定义 JS 计算容器坐标，并调用 PyAutoGUI 进行精确点击，配合 demo.py 的重连机制。
     """
     log("检测到 Cloudflare 整页盾，执行过盾流程...")
 
     for attempt in range(max_attempts):
         log(f"CF 盾绕过尝试 [{attempt + 1}/{max_attempts}]...")
         try:
-            sb.uc_gui_click_captcha()
+            # 1. 精确获取复选框坐标
+            rect = sb.execute_script('''
+                var widget = document.querySelector('input[name="cf-turnstile-response"]');
+                if (widget) {
+                    var el = widget;
+                    while(el && el.tagName !== 'BODY') {
+                        var r = el.getBoundingClientRect();
+                        if(r.width > 50 && r.height > 50) {
+                            return {x: r.x, y: r.y};
+                        }
+                        el = el.parentElement;
+                    }
+                }
+                return null;
+            ''')
+            
+            if rect:
+                import pyautogui
+                import sys
+                pyautogui.FAILSAFE = False  # 禁用角落防呆保护 (在无头/虚拟桌面环境下鼠标经常在 0,0)
+                
+                window_rect = sb.driver.get_window_rect()
+                nav_y = 133 if "mac" in sys.platform.lower() or sys.platform == "darwin" else 88
+                if is_linux():
+                    nav_y = 74 # 常见的 Linux Xvfb 窗口头部高度估计
+                
+                # Turnstile 复选框通常在容器左侧 30px，垂直居中 34px
+                target_x = window_rect["x"] + rect["x"] + 30
+                target_y = window_rect["y"] + nav_y + rect["y"] + 34
+                
+                log(f"📍 计算得到复选框物理坐标: ({target_x}, {target_y})")
+                pyautogui.moveTo(target_x, target_y, duration=0.6)
+                pyautogui.click()
+            else:
+                log("⚠️ 未能定位到 Turnstile 容器，回退到原生点击", "WARN")
+                sb.uc_gui_click_captcha()
+                
             time.sleep(6)
             
             if is_product_page_ready(sb):
