@@ -278,8 +278,22 @@ def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
                 log(f"📍 窗口: ({win_x},{win_y}) {width}x{height}, 内部: {inner_width}x{inner_height}")
                 log(f"📍 计算得到复选框物理绝对坐标: ({target_x}, {target_y})")
                 
+                log("🔌 正在断开 WebDriver 连接以规避检测...")
+                try:
+                    sb.disconnect()
+                except Exception as e:
+                    log(f"⚠️ 断开 WebDriver 失败: {e}", "WARN")
+                
                 pyautogui.moveTo(target_x, target_y, duration=0.6)
                 pyautogui.click()
+                
+                time.sleep(6)
+                
+                log("🔌 正在重新连接 WebDriver...")
+                try:
+                    sb.reconnect(5)
+                except Exception as e:
+                    log(f"⚠️ 重新连接 WebDriver 失败: {e}", "WARN")
             else:
                 log("⚠️ 未能定位到 Turnstile 容器，回退到原生点击", "WARN")
                 sb.uc_gui_click_captcha()
