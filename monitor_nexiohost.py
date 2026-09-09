@@ -254,10 +254,20 @@ def _try_click_cf(sb) -> bool:
     # 方法 C: 原生 ActionChains 精准点击 (兼容高版本 Chrome, 不依赖 CDP)
     try:
         log("🖱️ 尝试原生 ActionChains 点击...")
-        iframe = sb.driver.find_element("xpath", "//iframe[contains(@src, 'challenges.cloudflare.com')]")
+        # 等待 iframe 加载出来，最多等 10 秒
+        selector = "//iframe[contains(@src, 'challenges.cloudflare.com') or contains(@src, 'turnstile')]"
+        try:
+            sb.wait_for_element_present(selector, by="xpath", timeout=10)
+        except Exception:
+            log("  未能在 10 秒内等到 Cloudflare iframe 出现，可能不是交互式验证码", "WARN")
+            return False
+            
+        iframe = sb.driver.find_element("xpath", selector)
         from selenium.webdriver.common.action_chains import ActionChains
         actions = ActionChains(sb.driver)
+        # 将鼠标移动到 iframe 内部坐标 (30, 30) 然后点击
         actions.move_to_element_with_offset(iframe, 30, 30).click().perform()
+        log("  点击完成，等待验证跳转...")
         time.sleep(7)
         if is_product_page_ready(sb):
             return True
