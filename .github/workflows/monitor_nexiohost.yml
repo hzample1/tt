@@ -1,10 +1,10 @@
 name: NexioHost Free Bot 库存监控
 
 on:
-  workflow_dispatch:
-  schedule:
-    # 每 1 小时触发一次 (整点执行)，配合脚本内部持续约 59 分钟高频轮询，实现无缝平滑衔接
-    - cron: '0 * * * *'
+  workflow_dispatch: # 手动一键触发单次诊断测试
+  # 验证通过后取消下方注释即可开启每小时无缝监控:
+  # schedule:
+  #   - cron: '0 * * * *'
 
 concurrency:
   group: nexiohost-monitor
@@ -41,6 +41,7 @@ jobs:
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          RUN_ONCE: "true" # 开启单次诊断模式，输出控制台日志后退出
           LOOP_INTERVAL: "20"
           MAX_RUN_SECONDS: "3540"
         run: |

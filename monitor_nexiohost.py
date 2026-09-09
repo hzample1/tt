@@ -32,6 +32,7 @@ LOOP_INTERVAL = int(os.environ.get("LOOP_INTERVAL", "20"))        # 单次检测
 MAX_RUN_SECONDS = int(os.environ.get("MAX_RUN_SECONDS", "3540"))  # 单次 Action 运行时间（约 59 分钟）
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "").strip()
+RUN_ONCE = os.environ.get("RUN_ONCE", "true").strip().lower() in ("true", "1", "yes")  # 默认单次诊断模式
 
 
 def cn_time() -> str:
@@ -260,12 +261,12 @@ def format_alert_message(stock_info: Dict[str, Any], target_url: str) -> str:
 
 
 def run_monitor():
-    """主监控循环"""
-    log("=========================================")
-    log("NexioHost Free Discord Bot 监控开始启动...")
-    log(f"监控目标: {TARGET_URL}")
-    log(f"单次最长运行: {MAX_RUN_SECONDS} 秒, 轮询间隔: {LOOP_INTERVAL} 秒")
-    log("=========================================")
+    """主监控逻辑"""
+    mode_text = "单次诊断测试模式 (RUN_ONCE=True)" if RUN_ONCE else f"循环监控模式 (持续 {MAX_RUN_SECONDS}s)"
+    log("=========================================================")
+    log(f"NexioHost Free Discord Bot 监控启动 - [{mode_text}]")
+    log(f"目标地址: {TARGET_URL}")
+    log("=========================================================")
 
     # Linux/GitHub Actions 环境下启用虚拟显示屏 xvfb=True
     use_xvfb = sys.platform != "win32"
@@ -274,10 +275,10 @@ def run_monitor():
     round_count = 0
 
     with SB(uc=True, xvfb=use_xvfb) as sb:
-        while time.time() - start_time < MAX_RUN_SECONDS:
+        while True:
             round_count += 1
             elapsed = int(time.time() - start_time)
-            log(f"--- [第 {round_count} 轮检测] (已运行 {elapsed}s/{MAX_RUN_SECONDS}s) ---")
+            log(f"--- [第 {round_count} 轮检测] (已运行 {elapsed}s) ---")
 
             try:
                 # 打开或刷新页面
@@ -286,17 +287,43 @@ def run_monitor():
                 # 处理 Cloudflare Turnstile 验证盾
                 bypassed = bypass_cloudflare_challenge(sb, timeout=45)
                 if not bypassed:
-                    log("本轮过盾未完成，稍后重试...", "WARN")
+                    log("本轮 Cloudflare 盾未成功通过", "WARN")
+                    if RUN_ONCE:
+                        print("\n" + "=" * 60)
+                        print("⚠️ 【Cloudflare 盾检测诊断未通过】")
+                        print("=" * 60)
+                        print(f"当前页面标题: {sb.get_title()}")
+                        print(f"当前页面 URL : {sb.get_current_url()}")
+                        print("提示: 页面可能仍在安全验证中或被 Cloudflare 拦截。")
+                        print("=" * 60 + "\n")
+                        return
                     time.sleep(LOOP_INTERVAL)
                     continue
 
-                # 获取页面 HTML 解析库存
+                # 获取页面 HTML 并解析库存
                 html_content = sb.get_page_source()
                 stock_info = parse_paymenter_stock(html_content)
 
-                log(f"检测结果 -> 套餐: {stock_info['title']} | 有货: {stock_info['has_stock']} | 状态: {stock_info['status_desc']}")
+                # 在 Actions 控制台打印醒目的格式化诊断报告
+                stock_badge = "🎉 有货 (In stock)！" if stock_info["has_stock"] else "❌ 缺货 (Out of stock)"
+                print("\n" + "=" * 60)
+                print("📊 【NexioHost 商品监控状态报告】")
+                print("=" * 60)
+                print(f"📦 商品名称 : {stock_info['title']}")
+                print(f"💰 套餐价格 : {stock_info['price']}")
+                print(f"📈 库存状态 : {stock_badge}")
+                print(f"📝 状态说明 : {stock_info['status_desc']}")
+                if stock_info["stock_count"] is not None:
+                    print(f"🔢 剩余数量 : {stock_info['stock_count']} 个")
+                if stock_info["specs"]:
+                    print("⚙️ 硬件规格 :")
+                    for spec in stock_info["specs"]:
+                        print(f"   • {spec}")
+                print(f"🔗 监控地址 : {TARGET_URL}")
+                print(f"⏰ 检测时间 : {cn_time()}")
+                print("=" * 60 + "\n")
 
-                # 发现有库存时推送并安全退出（避免短时间内重复轰炸）
+                # 发现有库存时推送并退出
                 if stock_info["has_stock"]:
                     log("🎉🎉🎉 检测到有库存可用！正在推送 Telegram 提醒...", "SUCCESS")
                     msg = format_alert_message(stock_info, TARGET_URL)
@@ -304,8 +331,18 @@ def run_monitor():
                     log("已发送抢购提醒，任务提前退出。")
                     return
 
+                # 单次模式：打印完成后即刻正常退出
+                if RUN_ONCE:
+                    log("✅ 单次检测成功完成！页面状态正常解析，当前处于缺货状态。")
+                    return
+
             except Exception as e:
                 log(f"本轮检测发生异常: {e}", "ERROR")
+                if RUN_ONCE:
+                    return
+
+            if time.time() - start_time >= MAX_RUN_SECONDS:
+                break
 
             time.sleep(LOOP_INTERVAL)
 
