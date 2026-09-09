@@ -256,20 +256,29 @@ def _try_click_cf(sb) -> bool:
 
 def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
     """
-    代理直通模式：由于使用了干净 IP 的代理，CF 盾通常会在几秒内自动通过。
-    不再需要复杂的 JS 坐标计算和鼠标模拟点击。
-    只需耐心等待，并适时刷新即可。
+    代理直通模式：由于使用了干净 IP 的代理，CF 盾应该更容易通过。
+    但有时如果是交互式验证码，仍需要点击一下。
     """
-    log("检测到 Cloudflare 整页盾，由于已启用代理，等待盾自动通过...")
+    log("检测到 Cloudflare 整页盾，由于已启用代理，尝试等待并点击...")
 
     for attempt in range(max_attempts):
-        log(f"等待 CF 盾自动验证 [{attempt + 1}/{max_attempts}]...")
-        # 给 CF 盾 10 秒时间自动验证并跳转
-        time.sleep(10)
+        log(f"等待 CF 盾自动验证 / 尝试点击 [{attempt + 1}/{max_attempts}]...")
+        # 等待几秒看是否自动跳转
+        time.sleep(5)
         
         if is_product_page_ready(sb):
             log("✅ Cloudflare 挑战已自动通过，成功到达商品页面！")
             return True
+            
+        log("仍未通过，尝试模拟点击 Turnstile 复选框...")
+        try:
+            sb.driver.maximize_window()
+            time.sleep(1)
+            if _try_click_cf(sb):
+                log("✅ Cloudflare 挑战点击后通过！")
+                return True
+        except Exception as e:
+            log(f"尝试点击异常: {e}", "WARN")
             
         log("仍未通过，尝试刷新页面触发重新验证...")
         try:
@@ -278,7 +287,7 @@ def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
         except Exception as e:
             log(f"刷新异常: {e}", "WARN")
 
-    log("❌ 代理模式下仍未能自动通过 Cloudflare 盾", "ERROR")
+    log("❌ 代理模式下仍未能通过 Cloudflare 盾", "ERROR")
     return False
 
 
