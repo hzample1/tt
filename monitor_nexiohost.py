@@ -225,17 +225,24 @@ def is_cloudflare_interstitial(sb) -> bool:
 
 def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
     """
-    针对 billing.nexiohost.in 的特殊过盾逻辑：
-    由于该站点的 Turnstile 位于 Shadow DOM 且非居中，原生的 uc_gui_click_captcha 
-    会因为找不到 iframe 而默认点击屏幕正中心，导致完美避开复选框。
-    这里使用自定义 JS 计算容器坐标，并调用 PyAutoGUI 进行精确点击，配合 demo.py 的重连机制。
+    针对 billing.nexiohost.in 的 Cloudflare 整页盾绕过。
+
+    核心问题：SeleniumBase 的 uc_gui_click_captcha() 在找不到 Turnstile iframe 时
+    会回退到点击屏幕正中心。而该站点的 Turnstile 复选框偏左，导致每次都点空。
+
+    解决方案：先用 JS 定位复选框在 viewport 中的坐标，然后移动浏览器窗口，
+    使复选框恰好落在虚拟屏幕(1920x1080)的正中心。
+    之后调用 uc_gui_click_captcha()，它会：
+      1) 断开 WebDriver（使 navigator.webdriver=false）
+      2) 用 PyAutoGUI 点击屏幕中心（此时正好命中复选框）
+      3) 重新连接 WebDriver
     """
     log("检测到 Cloudflare 整页盾，执行过盾流程...")
 
     for attempt in range(max_attempts):
         log(f"CF 盾绕过尝试 [{attempt + 1}/{max_attempts}]...")
         try:
-            # 1. 精确获取复选框所在的 client 坐标
+            # 1. 定位 Turnstile 容器在 viewport 中的坐标
             rect = sb.execute_script('''
                 var widget = document.querySelector('input[name="cf-turnstile-response"]');
                 if (widget) {
@@ -250,56 +257,45 @@ def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
                 }
                 return null;
             ''')
-            
+
             if rect:
-                import pyautogui
-                pyautogui.FAILSAFE = False  # 禁用角落防呆保护
-                
-                # 按照 SeleniumBase 源码 _uc_gui_click_captcha 的标准方法计算真实的屏幕绝对坐标
+                # 2. 计算复选框在 viewport 中的中心点
+                checkbox_vp_x = rect["x"] + 30   # 复选框在容器左侧约30px处
+                checkbox_vp_y = rect["y"] + 34    # 垂直方向约34px处
+
+                # 3. 获取窗口与内容区的尺寸差（工具栏/边框的像素）
                 window_rect = sb.driver.get_window_rect()
-                width = window_rect["width"]
-                height = window_rect["height"]
-                win_x = window_rect["x"]
-                win_y = window_rect["y"]
-                
-                inner_width = sb.execute_script("return window.innerWidth;")
-                inner_height = sb.execute_script("return window.innerHeight;")
-                
-                x_border = (width - inner_width) / 2.0
-                nav_top = height - inner_height - x_border
-                
-                # Turnstile 复选框通常在容器左侧，向右偏移约 30px，垂直偏移约 34px
-                client_x = rect["x"] + 30
-                client_y = rect["y"] + 34
-                
-                target_x = win_x + x_border + client_x
-                target_y = win_y + nav_top + client_y
-                
-                log(f"📍 窗口: ({win_x},{win_y}) {width}x{height}, 内部: {inner_width}x{inner_height}")
-                log(f"📍 计算得到复选框物理绝对坐标: ({target_x}, {target_y})")
-                
-                log("🔌 正在断开 WebDriver 连接以规避检测...")
-                try:
-                    sb.disconnect()
-                except Exception as e:
-                    log(f"⚠️ 断开 WebDriver 失败: {e}", "WARN")
-                
-                pyautogui.moveTo(target_x, target_y, duration=0.6)
-                pyautogui.click()
-                
-                time.sleep(6)
-                
-                log("🔌 正在重新连接 WebDriver...")
-                try:
-                    sb.reconnect(5)
-                except Exception as e:
-                    log(f"⚠️ 重新连接 WebDriver 失败: {e}", "WARN")
-            else:
-                log("⚠️ 未能定位到 Turnstile 容器，回退到原生点击", "WARN")
+                w_width = window_rect["width"]
+                w_height = window_rect["height"]
+                inner_w = sb.execute_script("return window.innerWidth;")
+                inner_h = sb.execute_script("return window.innerHeight;")
+
+                x_border = (w_width - inner_w) / 2.0
+                nav_top = w_height - inner_h - x_border
+
+                # 4. 计算新的窗口位置，使复选框精确落在 1920x1080 屏幕的中心
+                screen_cx, screen_cy = 960, 540
+                new_x = int(screen_cx - x_border - checkbox_vp_x)
+                new_y = int(screen_cy - nav_top - checkbox_vp_y)
+
+                log(f"📍 Turnstile 容器: x={rect['x']}, y={rect['y']}, "
+                    f"w={rect['width']:.0f}, h={rect['height']:.0f}")
+                log(f"📍 复选框 viewport 坐标: ({checkbox_vp_x}, {checkbox_vp_y})")
+                log(f"📍 窗口边框: x_border={x_border}, nav_top={nav_top}")
+                log(f"📍 移动窗口到 ({new_x}, {new_y})，使复选框对准屏幕中心 (960, 540)")
+
+                sb.driver.set_window_position(new_x, new_y)
+                time.sleep(1)
+
+                # 5. 调用 SeleniumBase 原生方法（内部自动断开/重连 WebDriver）
+                log("🖱️ 调用 uc_gui_click_captcha() (窗口已重新定位)...")
                 sb.uc_gui_click_captcha()
-                
+            else:
+                log("⚠️ 未能定位 Turnstile 容器，直接调用 uc_gui_click_captcha()", "WARN")
+                sb.uc_gui_click_captcha()
+
             time.sleep(6)
-            
+
             if is_product_page_ready(sb):
                 log("✅ Cloudflare 挑战已通过，成功到达商品页面！")
                 return True
