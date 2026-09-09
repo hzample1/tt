@@ -32,7 +32,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb
           python -m pip install --upgrade pip
-          pip install seleniumbase requests beautifulsoup4
+          pip install seleniumbase requests beautifulsoup4 pyvirtualdisplay
 
       - name: 启动 Cloudflare WARP (优化出口 IP)
         uses: fscarmen/warp-on-actions@v1.1

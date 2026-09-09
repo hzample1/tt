@@ -7,3 +7,6 @@ output/
 *.log
 test_*.html
 *.html
+demo.py
+downloaded_files/
+*.png
