@@ -74,6 +74,39 @@ def send_tg_message(token: str, chat_id: str, text: str) -> bool:
     return False
 
 
+def send_tg_photo(token: str, chat_id: str, photo_path: str, caption: str = "") -> bool:
+    """发送本地图片截图到 Telegram"""
+    if not token or not chat_id:
+        log("未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过 Telegram 发送", "WARN")
+        return False
+
+    if not os.path.exists(photo_path):
+        log(f"截图文件不存在: {photo_path}", "WARN")
+        return False
+
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    for attempt in range(1, 4):
+        try:
+            with open(photo_path, "rb") as f:
+                files = {"photo": f}
+                data = {
+                    "chat_id": chat_id,
+                    "caption": caption[:1024],
+                    "parse_mode": "HTML"
+                }
+                resp = requests.post(url, files=files, data=data, timeout=30)
+                if resp.status_code == 200:
+                    log("✅ Telegram 页面截图发送成功！")
+                    return True
+                else:
+                    log(f"⚠️ Telegram 截图发送失败 (尝试 {attempt}/3): HTTP {resp.status_code} - {resp.text}", "WARN")
+        except Exception as e:
+            log(f"⚠️ Telegram 截图发送异常 (尝试 {attempt}/3): {e}", "WARN")
+        time.sleep(2)
+
+    return False
+
+
 def is_turnstile_token_ready(sb) -> bool:
     """检查是否已经生成有效的 Turnstile Token"""
     try:
@@ -288,13 +321,30 @@ def run_monitor():
                 bypassed = bypass_cloudflare_challenge(sb, timeout=45)
                 if not bypassed:
                     log("本轮 Cloudflare 盾未成功通过", "WARN")
+
+                    # 截屏并推送到 Telegram
+                    screenshot_file = "cf_blocked.png"
+                    try:
+                        sb.save_screenshot(screenshot_file)
+                        log(f"已保存 Cloudflare 页面截图: {screenshot_file}")
+                        caption = (
+                            f"⚠️ <b>【NexioHost 监控 - Cloudflare 盾未通过】</b>\n\n"
+                            f"📄 <b>当前标题</b>: {html.escape(sb.get_title())}\n"
+                            f"🔗 <b>当前链接</b>: {html.escape(sb.get_current_url())}\n"
+                            f"⏰ <b>检测时间</b>: {cn_time()}\n\n"
+                            f"<i>已截取当前 Actions 无头浏览器画面，请查阅以排查拦截原因。</i>"
+                        )
+                        send_tg_photo(TG_BOT_TOKEN, TG_CHAT_ID, screenshot_file, caption)
+                    except Exception as err:
+                        log(f"保存截图或发送 TG 异常: {err}", "WARN")
+
                     if RUN_ONCE:
                         print("\n" + "=" * 60)
                         print("⚠️ 【Cloudflare 盾检测诊断未通过】")
                         print("=" * 60)
                         print(f"当前页面标题: {sb.get_title()}")
                         print(f"当前页面 URL : {sb.get_current_url()}")
-                        print("提示: 页面可能仍在安全验证中或被 Cloudflare 拦截。")
+                        print("已将当前屏幕截图推送至 Telegram，请查阅。")
                         print("=" * 60 + "\n")
                         return
                     time.sleep(LOOP_INTERVAL)
@@ -331,8 +381,23 @@ def run_monitor():
                     log("已发送抢购提醒，任务提前退出。")
                     return
 
-                # 单次模式：打印完成后即刻正常退出
+                # 单次模式：截取成功访问的商品页面图推送到 TG，并退出
                 if RUN_ONCE:
+                    screenshot_file = "product_page.png"
+                    try:
+                        sb.save_screenshot(screenshot_file)
+                        log(f"已保存商品页面截图: {screenshot_file}")
+                        caption = (
+                            f"📊 <b>【NexioHost 商品页面诊断截图】</b>\n\n"
+                            f"📦 <b>商品名称</b>: {html.escape(stock_info['title'])}\n"
+                            f"📈 <b>库存状态</b>: {stock_badge}\n"
+                            f"📝 <b>状态详情</b>: {html.escape(stock_info['status_desc'])}\n"
+                            f"⏰ <b>检测时间</b>: {cn_time()}"
+                        )
+                        send_tg_photo(TG_BOT_TOKEN, TG_CHAT_ID, screenshot_file, caption)
+                    except Exception as err:
+                        log(f"保存截图或发送 TG 异常: {err}", "WARN")
+
                     log("✅ 单次检测成功完成！页面状态正常解析，当前处于缺货状态。")
                     return
 
