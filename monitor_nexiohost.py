@@ -225,76 +225,33 @@ def is_cloudflare_interstitial(sb) -> bool:
 
 def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
     """
-    参考 demo.py 的核心过盾逻辑：
-    1. 动态等待 Turnstile iframe 渲染
-    2. 使用 uc_gui_click_captcha 点击复选框
-    3. 每次点击后等待 6 秒进行结算并持续轮询 is_product_page_ready
-    4. 若 3 次未过，使用 uc_open_with_reconnect(TARGET_URL, reconnect_time=10) 重新加载
+    完全参考 demo.py 的过盾逻辑：
+    1. 尝试 uc_gui_click_captcha() 并等待
+    2. 如果失败则重试
+    3. 如果多次重试失败，则刷新页面
     """
     log("检测到 Cloudflare 整页盾，执行过盾流程...")
 
-    if is_product_page_ready(sb):
-        log("✅ 页面已直接处于商品页面")
-        return True
-
     for attempt in range(max_attempts):
         log(f"CF 盾绕过尝试 [{attempt + 1}/{max_attempts}]...")
-
-        # 给 Turnstile 复选框 iframe 2-4 秒时间渲染到页面
-        for _ in range(5):
-            has_iframe = sb.execute_script('''
-                var frames = document.querySelectorAll('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]');
-                return frames.length > 0;
-            ''')
-            if has_iframe:
-                break
-            time.sleep(1)
-
         try:
-            # 采用 demo.py 验证有效的 uc_gui_click_captcha
             sb.uc_gui_click_captcha()
-            log("已调用 uc_gui_click_captcha()，等待 6s 验证与跳转结算...")
-        except Exception as e:
-            log(f"uc_gui_click_captcha 点击尝试失败: {e}，尝试备用 uc_gui_click_cf...", "WARN")
-            try:
-                sb.uc_gui_click_cf()
-            except Exception as e2:
-                log(f"uc_gui_click_cf 亦异常: {e2}", "WARN")
-
-        # 点击后轮询 8 秒，检查是否已跳转进入真实商品页
-        wait_start = time.time()
-        while time.time() - wait_start < 8:
+            time.sleep(6)
+            
             if is_product_page_ready(sb):
-                log("🎉 成功突破 Cloudflare 盾，已到达商品页面！")
+                log("✅ Cloudflare 挑战已通过，成功到达商品页面！")
                 return True
-            time.sleep(1)
+        except Exception as e:
+            log(f"CF 绕过尝试 {attempt + 1} 失败: {e}", "WARN")
+        time.sleep(3)
 
-        log(f"第 {attempt + 1} 次尝试后仍未进入商品页，准备重试...")
-        time.sleep(2)
-
-    log("3 次常规尝试未果，尝试通过 uc_open_with_reconnect(reconnect_time=10s) 重新加载...")
+    log("3 次常规尝试未果，尝试通过 uc_open_with_reconnect 重新加载...")
     try:
         sb.uc_open_with_reconnect(TARGET_URL, reconnect_time=10)
         time.sleep(5)
         if is_product_page_ready(sb):
-            log("✅ 刷新重连后成功进入商品页面！")
+            log("✅ 刷新后 Cloudflare 挑战已消失，成功进入商品页面！")
             return True
-
-        log("刷新重连后尝试最后一次补点...")
-        try:
-            sb.uc_gui_click_captcha()
-        except Exception:
-            try:
-                sb.uc_gui_click_cf()
-            except Exception:
-                pass
-
-        wait_start = time.time()
-        while time.time() - wait_start < 8:
-            if is_product_page_ready(sb):
-                log("✅ 最终补点成功进入商品页面！")
-                return True
-            time.sleep(1)
     except Exception as e:
         log(f"刷新重连异常: {e}", "WARN")
 
