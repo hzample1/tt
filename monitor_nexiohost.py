@@ -134,44 +134,67 @@ def is_cf_page(sb) -> bool:
     return False
 
 
-def bypass_cloudflare_challenge(sb, timeout: int = 60) -> bool:
+def has_turnstile_checkbox(sb) -> bool:
+    """检查页面上是否真正渲染出了可点击的 Turnstile 复选框 iframe"""
+    try:
+        return sb.execute_script('''
+            var frames = document.querySelectorAll('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]');
+            for (var i = 0; i < frames.length; i++) {
+                var r = frames[i].getBoundingClientRect();
+                if (r.width > 50 && r.height > 20) return true;
+            }
+            return false;
+        ''')
+    except Exception:
+        return False
+
+
+def bypass_cloudflare_challenge(sb, timeout: int = 75) -> bool:
     """
-    等待并解决 Cloudflare Turnstile 验证盾
+    优化版：先静默等待 Cloudflare 前端计算转圈，仅在真正出现复选框时才触发点击
     """
     log("正在检测 Cloudflare 盾状态...")
     start = time.time()
     last_click = 0
 
     while time.time() - start < timeout:
+        elapsed = int(time.time() - start)
         title = sb.get_title()
-        current_url = sb.get_current_url()
 
         # 1. 检查是否已经通过盾
         if "just a moment" not in title.lower() and "请稍候" not in title and not is_cf_page(sb):
-            log(f"✅ Cloudflare 盾已顺利通过！当前页面标题: {title}")
+            log(f"✅ Cloudflare 盾已顺利通过！(耗时 {elapsed}s) 标题: {title}")
             return True
 
         # 2. 检查是否已生成 Token
         if is_turnstile_token_ready(sb):
-            log("Turnstile 凭据已生成，等待页面跳转...")
+            log(f"Turnstile 凭据已生成 (耗时 {elapsed}s)，等待放行跳转...")
             time.sleep(2)
             if not is_cf_page(sb):
                 log("✅ 页面已完成跳转")
                 return True
 
-        # 3. 尝试触发点击
+        # 3. 前 15 秒完全静默：给 Cloudflare 后台 WASM/PoW 运算时间，避免频繁按键打断验证
+        if elapsed < 15:
+            time.sleep(1.5)
+            continue
+
+        # 4. 15 秒后，只有当页面真正渲染出验证框时才尝试点击
         now = time.time()
-        if now - last_click > 4:
-            last_click = now
-            try:
-                sb.uc_gui_click_cf()
-                log("已尝试触发 uc_gui_click_cf")
-            except Exception:
+        if now - last_click > 8:
+            if has_turnstile_checkbox(sb):
+                last_click = now
                 try:
-                    sb.uc_gui_click_captcha()
-                    log("已尝试触发 uc_gui_click_captcha")
-                except Exception as e:
-                    log(f"点击验证框出现微异常 (忽略继续轮询): {e}", "DEBUG")
+                    sb.uc_gui_click_cf()
+                    log("检测到复选框，触发 uc_gui_click_cf 点击")
+                except Exception:
+                    try:
+                        sb.uc_gui_click_captcha()
+                        log("触发 uc_gui_click_captcha 点击")
+                    except Exception:
+                        pass
+            else:
+                log(f"页面仍在后台静默验证中... (已等待 {elapsed}s/{timeout}s)")
 
         time.sleep(1.5)
 
@@ -180,7 +203,7 @@ def bypass_cloudflare_challenge(sb, timeout: int = 60) -> bool:
         log("✅ 最终确认已脱离 Cloudflare 盾")
         return True
 
-    log("⚠️ 解决 Cloudflare 盾超时，未能加载真实页面", "WARN")
+    log(f"⚠️ 解决 Cloudflare 盾超时 (共等待 {timeout}s)，未能进入商品页", "WARN")
     return False
 
 
