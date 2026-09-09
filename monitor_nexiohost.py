@@ -285,13 +285,11 @@ def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
             
         log("仍未通过，尝试模拟点击 Turnstile 复选框...")
         try:
-            sb.driver.maximize_window()
-            time.sleep(1)
             if _try_click_cf(sb):
                 log("✅ Cloudflare 挑战点击后通过！")
                 return True
         except Exception as e:
-            log(f"尝试点击异常: {e}", "WARN")
+            log(f"尝试点击外部捕获异常: {e}", "WARN")
             
         log("仍未通过，尝试刷新页面触发重新验证...")
         try:
