@@ -14,6 +14,7 @@ import html
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone, timedelta
 import requests
+from bs4 import BeautifulSoup
 from seleniumbase import SB
 
 # 控制台编码保护 (Windows)
@@ -151,63 +152,79 @@ def bypass_cloudflare_challenge(sb, timeout: int = 60) -> bool:
 
 def parse_paymenter_stock(html_content: str) -> Dict[str, Any]:
     """
-    解析 Paymenter 系统的商品卡片与购买可用性
+    针对 Paymenter 系统 (Livewire wire:name="products.show") 解析商品库存状态
     """
-    lower = html_content.lower()
+    soup = BeautifulSoup(html_content, "html.parser")
 
-    # 1. 提取商品标题
+    # 1. 优先定位 Livewire 的 products.show 核心容器
+    container = soup.find("div", attrs={"wire:name": "products.show"})
+    if not container:
+        h1_elem = soup.find("h1")
+        container = h1_elem.parent if (h1_elem and h1_elem.parent) else soup
+
+    container_text = container.get_text(" ", strip=True).lower()
+
+    # 2. 提取商品标题与价格
     title = "Free Discord Bot"
-    title_match = re.search(r"<h1[^>]*>(.*?)</h1>", html_content, re.IGNORECASE | re.DOTALL)
-    if title_match:
-        clean_title = re.sub(r"<[^>]+>", "", title_match.group(1)).strip()
+    h1_elem = container.find("h1")
+    if h1_elem:
+        clean_title = h1_elem.get_text(strip=True)
         if clean_title:
             title = clean_title
 
-    # 2. 缺货判定关键词
-    out_of_stock_keywords = [
-        "out of stock", "sold out", "0 in stock",
-        "currently unavailable", "unavailable", "0 left", "no stock"
-    ]
-    is_out_of_stock = any(kw in lower for kw in out_of_stock_keywords)
+    price = "Free"
+    price_elem = container.find("span", class_=lambda c: c and "text-primary" in c)
+    if price_elem and price_elem.get_text(strip=True):
+        price = price_elem.get_text(strip=True)
 
-    # 3. 提取剩余库存数字 (如 5 in stock / 10 available)
+    # 3. 提取规格配置参数
+    specs = []
+    article = container.find("article")
+    if article:
+        specs = [li.get_text(strip=True) for li in article.find_all("li") if li.get_text(strip=True)]
+
+    # 4. 判断缺货提示 (检查 nx-chip 标签与提示文本)
+    is_out_of_stock = False
+    chip = container.find(class_=lambda c: c and "nx-chip" in c)
+    if chip and "out of stock" in chip.get_text().lower():
+        is_out_of_stock = True
+    elif "product" in container_text and "is out of stock" in container_text:
+        is_out_of_stock = True
+
+    # 5. 检查具体剩余库存数量
     stock_count = None
-    count_match = re.search(r"(\d+)\s*(?:in stock|available|units left|left in stock)", lower)
+    count_match = re.search(r"(\d+)\s*(?:in stock|available|units left)", container_text)
     if count_match:
         stock_count = int(count_match.group(1))
 
-    # 4. 检查下单按钮是否存在
-    has_disabled_btn = bool(re.search(r"<button[^>]*disabled[^>]*>.*?(?:order|checkout|continue|buy|cart|out of stock).*?</button>", html_content, re.IGNORECASE | re.DOTALL))
-    has_active_btn = bool(re.search(r"<button(?![^>]*disabled)[^>]*>.*?(?:order|checkout|continue|buy now|add to cart|select).*?</button>", html_content, re.IGNORECASE | re.DOTALL)) or (
-        bool(re.search(r'<a(?![^>]*disabled)[^>]*href="[^"]*checkout[^"]*"[^>]*>', html_content, re.IGNORECASE))
+    # 6. 检查商品下单按钮或配置表单
+    action_elements = container.find_all(["button", "a", "form"])
+    has_order_action = any(
+        any(w in el.get_text().lower() for w in ["order", "checkout", "continue", "buy", "select", "add to cart"]) or
+        (el.has_attr("href") and "checkout" in el["href"].lower()) or
+        (el.has_attr("action") and "checkout" in el["action"].lower())
+        for el in action_elements
     )
 
-    # 5. 综合判定
+    # 7. 综合判定库存
     has_stock = False
-    status_desc = "缺货 (Out of stock)"
-
-    if stock_count is not None:
-        if stock_count > 0:
-            has_stock = True
-            status_desc = f"有库存 (剩余 {stock_count} 个)"
-        else:
-            has_stock = False
-            status_desc = "缺货 (0 in stock)"
-    elif is_out_of_stock or has_disabled_btn:
+    if is_out_of_stock:
         has_stock = False
-        status_desc = "缺货 (页面标记 Out of stock 或下单按钮已被禁用)"
-    elif has_active_btn:
+        status_desc = "缺货 (页面显示 Product is out of stock)"
+    elif stock_count is not None and stock_count > 0:
         has_stock = True
-        status_desc = "有库存 (检测到可用下单/结算按钮)"
-    elif not is_out_of_stock and ("in stock" in lower or "available" in lower):
+        status_desc = f"有库存 (剩余 {stock_count} 个)"
+    elif not is_out_of_stock and (has_order_action or "in stock" in container_text):
         has_stock = True
-        status_desc = "有库存 (页面标记 In stock)"
+        status_desc = "有库存 (可立即下单)"
     else:
         has_stock = False
-        status_desc = "未检测到明确下单按钮，默认缺货"
+        status_desc = "未检测到下单表单，默认缺货"
 
     return {
         "title": title,
+        "price": price,
+        "specs": specs,
         "has_stock": has_stock,
         "stock_count": stock_count,
         "status_desc": status_desc
@@ -218,15 +235,23 @@ def format_alert_message(stock_info: Dict[str, Any], target_url: str) -> str:
     """格式化有库存时的 TG 抢购提醒"""
     title = stock_info.get("title", "Free Discord Bot")
     desc = stock_info.get("status_desc", "有货！")
+    price = stock_info.get("price", "Free")
+    specs = stock_info.get("specs", [])
     count = stock_info.get("stock_count")
     stock_display = f"{count} 个" if count is not None else "有货 (可立即下单)"
+
+    specs_text = ""
+    if specs:
+        specs_lines = "\n".join([f"• {html.escape(s)}" for s in specs])
+        specs_text = f"⚙️ <b>配置参数</b>:\n{specs_lines}\n\n"
 
     return (
         f"🎉 <b>【发现 NexioHost Free Discord Bot 可用库存！】</b>\n\n"
         f"📦 <b>套餐名称</b>: {html.escape(title)}\n"
         f"📊 <b>当前库存</b>: <b>{stock_display}</b>\n"
-        f"💰 <b>套餐资费</b>: 免费 ($0.00 / mo)\n"
+        f"💰 <b>套餐资费</b>: {html.escape(price)}\n"
         f"📝 <b>状态详情</b>: {html.escape(desc)}\n\n"
+        f"{specs_text}"
         f"⚡ <b>抢购地址</b>:\n"
         f"<a href=\"{target_url}\">{target_url}</a>\n\n"
         f"⏰ <b>检测时间</b>: {cn_time()}\n"
