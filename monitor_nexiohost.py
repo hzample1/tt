@@ -137,7 +137,7 @@ def send_tg_photo(token: str, chat_id: str, photo_path: str, caption: str = "") 
     return False
 
 
-# ==================== Cloudflare 盾处理 (参考 demo.py) ====================
+# ==================== Cloudflare 盾与页面判断 (严格区分) ====================
 def clear_browser_state(sb):
     """清除浏览器 Cookie、localStorage、sessionStorage (参考 demo.py)"""
     try:
@@ -154,136 +154,151 @@ def clear_browser_state(sb):
     log("🧹 浏览器状态 (Cookie / 本地存储) 已清理")
 
 
-def is_cloudflare_interstitial(sb) -> bool:
+def is_product_page_ready(sb) -> bool:
     """
-    检查页面是否仍处于 Cloudflare 盾（5秒盾 / 人机验证 / Turnstile 拦截页）。
-    参考 demo.py：
-    1. 若已出现目标页面核心 DOM (wire:name="products.show" / h1 等)，则判定非盾。
-    2. 检查 title / page_source 是否包含 CF 特征关键字。
-    3. 检查 body 文本极短且含 challenges.cloudflare.com 的特征。
+    正向确实验证：只有真正加载了 Paymenter 商品页核心 DOM，才算成功进入！
+    1. 必须存在 wire:name="products.show"
+    2. 或 h1 标题为包含 "Discord" 的真实商品名 (排除 billing.nexiohost.in)
     """
     try:
-        # 1. 优先检查是否已成功加载 Paymenter 商品容器
-        has_product = sb.execute_script('''
-            return !!(document.querySelector('[wire\\:name="products.show"]')
-                   || (document.querySelector('h1') && document.querySelector('h1').innerText.toLowerCase().includes('discord'))
-                   || document.querySelector('.nx-chip'));
-        ''')
-        if has_product:
-            return False
-
-        page_source = sb.get_page_source()
-        title = sb.get_title().lower() if sb.get_title() else ""
-
-        strong_indicators = [
-            "Just a moment",
-            "Verify you are human",
-            "Checking your browser",
-            "Checking if the site connection is secure",
-            "Performing security verification",
-            "Security Check",
-            "challenges.cloudflare.com",
-            "cf-mitigated",
-        ]
-        for indicator in strong_indicators:
-            if indicator.lower() in page_source.lower():
-                return True
-
-        if "just a moment" in title or "attention required" in title or "security verification" in title:
-            return True
-
-        body_text_len = sb.execute_script('''
-            return (document.body && document.body.innerText)
-                ? document.body.innerText.trim().length : 0;
-        ''')
-        if body_text_len < 100 and "challenges.cloudflare.com" in page_source:
-            return True
-
-        current_url = sb.get_current_url()
-        if "free-discord-bot" not in current_url:
-            return True
-
-        return False
+        return bool(sb.execute_script('''
+            var container = document.querySelector('[wire\\:name="products.show"]');
+            var h1 = document.querySelector('h1');
+            var isProductH1 = !!(h1 && h1.innerText && h1.innerText.toLowerCase().includes('discord'));
+            var hasChip = !!document.querySelector('.nx-chip');
+            return !!(container || isProductH1 || hasChip);
+        '''))
     except Exception:
         return False
 
 
-def wait_for_turnstile_success(sb, timeout: int = 20) -> bool:
-    """等待 Turnstile 验证生成 Token 或标记为 solved (参考 demo.py)"""
-    log("等待 Turnstile 凭据生成...")
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            success = sb.execute_script('''
-                var resp = document.querySelector('input[name="cf-turnstile-response"]');
-                if (resp && resp.value && resp.value.length > 20) return true;
-                var grecap = document.querySelector('textarea[name="g-recaptcha-response"]');
-                if (grecap && grecap.value && grecap.value.length > 20) return true;
-                var iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
-                if (iframe && iframe.getAttribute("data-state") === "solved") return true;
-                return false;
-            ''')
-            if success:
-                log("✅ Turnstile 凭据已生成或标记为 solved")
+def is_cloudflare_interstitial(sb) -> bool:
+    """
+    判断当前是否仍在 Cloudflare 盾页面。
+    若已明确进入商品页面，则必定不是盾页面。
+    """
+    if is_product_page_ready(sb):
+        return False
+
+    try:
+        h1_text = sb.execute_script('''
+            var h1 = document.querySelector('h1');
+            return h1 ? h1.innerText.trim() : '';
+        ''') or ""
+
+        # Cloudflare 挑战页标志：h1 直接显示站点域名 billing.nexiohost.in
+        if "billing.nexiohost.in" in h1_text.lower():
+            return True
+
+        page_source = sb.get_page_source()
+        title = (sb.get_title() or "").lower()
+
+        strong_indicators = [
+            "challenges.cloudflare.com",
+            "ray id",
+            "cf-chl-widget",
+            "cf_chl_opt",
+            "cf-mitigated",
+            "performing security verification",
+            "正在进行安全验证",
+            "verify you are human",
+            "just a moment",
+            "checking your browser",
+            "security check",
+        ]
+        for indicator in strong_indicators:
+            if indicator in page_source.lower() or indicator in title:
                 return True
-        except Exception:
-            pass
-        time.sleep(1)
-    return False
+
+        body_text_len = sb.execute_script('''
+            return (document.body && document.body.innerText)
+                ? document.body.innerText.trim().length : 0;
+        ''') or 0
+        if body_text_len < 300:
+            return True
+
+        # 若既没有真实商品 DOM，也处于异常状态，默认仍为未脱盾
+        return True
+    except Exception:
+        return True
 
 
 def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
     """
     参考 demo.py 的核心过盾逻辑：
-    1. 最多尝试 max_attempts 次 uc_gui_click_captcha() 点击
-    2. 每次点击后等待 6 秒给 Cloudflare 结算判定
-    3. 若 3 次未过，使用 uc_open_with_reconnect(TARGET_URL, reconnect_time=10) 强制刷新
+    1. 动态等待 Turnstile iframe 渲染
+    2. 使用 uc_gui_click_captcha 点击复选框
+    3. 每次点击后等待 6 秒进行结算并持续轮询 is_product_page_ready
+    4. 若 3 次未过，使用 uc_open_with_reconnect(TARGET_URL, reconnect_time=10) 重新加载
     """
-    log("检测到 Cloudflare 整页挑战，执行参考 demo.py 绕过流程...")
+    log("检测到 Cloudflare 整页盾，执行过盾流程...")
 
-    if not is_cloudflare_interstitial(sb):
-        log("✅ 页面已不在 Cloudflare 挑战状态")
+    if is_product_page_ready(sb):
+        log("✅ 页面已直接处于商品页面")
         return True
 
     for attempt in range(max_attempts):
-        log(f"CF 绕过尝试 [{attempt + 1}/{max_attempts}]...")
+        log(f"CF 盾绕过尝试 [{attempt + 1}/{max_attempts}]...")
+
+        # 给 Turnstile 复选框 iframe 2-4 秒时间渲染到页面
+        for _ in range(5):
+            has_iframe = sb.execute_script('''
+                var frames = document.querySelectorAll('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]');
+                return frames.length > 0;
+            ''')
+            if has_iframe:
+                break
+            time.sleep(1)
+
         try:
-            # 采用 demo.py 中证明有效的 uc_gui_click_captcha 方法
+            # 采用 demo.py 验证有效的 uc_gui_click_captcha
             sb.uc_gui_click_captcha()
-            log("已调用 uc_gui_click_captcha()，等待 6s 验证结算...")
-            time.sleep(6)
-
-            if wait_for_turnstile_success(sb, timeout=4) or not is_cloudflare_interstitial(sb):
-                time.sleep(2)
-                if not is_cloudflare_interstitial(sb):
-                    log("✅ Cloudflare 挑战已成功通过！")
-                    return True
+            log("已调用 uc_gui_click_captcha()，等待 6s 验证与跳转结算...")
         except Exception as e:
-            log(f"CF 绕过尝试 [{attempt + 1}] 异常: {e}", "WARN")
+            log(f"uc_gui_click_captcha 点击尝试失败: {e}，尝试备用 uc_gui_click_cf...", "WARN")
+            try:
+                sb.uc_gui_click_cf()
+            except Exception as e2:
+                log(f"uc_gui_click_cf 亦异常: {e2}", "WARN")
 
-        time.sleep(3)
+        # 点击后轮询 8 秒，检查是否已跳转进入真实商品页
+        wait_start = time.time()
+        while time.time() - wait_start < 8:
+            if is_product_page_ready(sb):
+                log("🎉 成功突破 Cloudflare 盾，已到达商品页面！")
+                return True
+            time.sleep(1)
 
-    log("尝试刷新页面重新加载 (reconnect_time=10s)...")
+        log(f"第 {attempt + 1} 次尝试后仍未进入商品页，准备重试...")
+        time.sleep(2)
+
+    log("3 次常规尝试未果，尝试通过 uc_open_with_reconnect(reconnect_time=10s) 重新加载...")
     try:
         sb.uc_open_with_reconnect(TARGET_URL, reconnect_time=10)
         time.sleep(5)
-        if not is_cloudflare_interstitial(sb):
-            log("✅ 刷新重连后 Cloudflare 挑战已通过！")
+        if is_product_page_ready(sb):
+            log("✅ 刷新重连后成功进入商品页面！")
             return True
 
-        log("刷新后仍有挑战，尝试最后一次点击...")
+        log("刷新重连后尝试最后一次补点...")
         try:
             sb.uc_gui_click_captcha()
-            time.sleep(6)
-            if not is_cloudflare_interstitial(sb):
-                log("✅ 刷新并再次点击后通过 Cloudflare 挑战！")
-                return True
         except Exception:
-            pass
-    except Exception as e:
-        log(f"重新加载页面异常: {e}", "WARN")
+            try:
+                sb.uc_gui_click_cf()
+            except Exception:
+                pass
 
-    return False
+        wait_start = time.time()
+        while time.time() - wait_start < 8:
+            if is_product_page_ready(sb):
+                log("✅ 最终补点成功进入商品页面！")
+                return True
+            time.sleep(1)
+    except Exception as e:
+        log(f"刷新重连异常: {e}", "WARN")
+
+    return is_product_page_ready(sb)
 
 
 def handle_initial_page(sb) -> bool:
@@ -297,13 +312,15 @@ def handle_initial_page(sb) -> bool:
     current_url = sb.get_current_url()
     log(f"当前页面 URL: {current_url}")
 
-    if is_cloudflare_interstitial(sb):
-        log("检测到 Cloudflare 整页挑战，启动过盾流程...")
-        if not bypass_cloudflare_interstitial(sb, max_attempts=3):
+    if not is_product_page_ready(sb):
+        log("检测到页面尚未呈现商品内容 (仍受 CF 盾拦截)，启动过盾流程...")
+        passed = bypass_cloudflare_interstitial(sb, max_attempts=3)
+        if not passed:
+            log("❌ Cloudflare 盾未能成功通过", "ERROR")
             return False
 
     time.sleep(2)
-    return not is_cloudflare_interstitial(sb)
+    return is_product_page_ready(sb)
 
 
 # ==================== Paymenter DOM 解析 ====================
@@ -314,8 +331,15 @@ def parse_paymenter_stock(html_content: str) -> Dict[str, Any]:
     # 1. 定位 Livewire products.show 核心容器
     container = soup.find("div", attrs={"wire:name": "products.show"})
     if not container:
-        h1_elem = soup.find("h1")
-        container = h1_elem.parent if (h1_elem and h1_elem.parent) else soup
+        # 如果根本没有 products.show 容器，严禁将 Cloudflare 页面误报为商品
+        return {
+            "title": "Unknown (未进入商品页)",
+            "price": "Free",
+            "specs": [],
+            "has_stock": False,
+            "stock_count": None,
+            "status_desc": "页面未找到 wire:name=\"products.show\" 容器，未能成功脱离拦截页"
+        }
 
     container_text = container.get_text(" ", strip=True).lower()
 
@@ -461,13 +485,13 @@ def run_monitor():
                         # 后续轮次：利用已获取的 cf_clearance 保持状态访问
                         sb.open(TARGET_URL)
                         time.sleep(3)
-                        bypassed = True
-                        if is_cloudflare_interstitial(sb):
+                        bypassed = is_product_page_ready(sb)
+                        if not bypassed:
                             log("检测到 Cloudflare 盾重现，重新执行绕过...")
                             bypassed = bypass_cloudflare_interstitial(sb, max_attempts=2)
 
                     if not bypassed:
-                        log("本轮 Cloudflare 盾未通过", "WARN")
+                        log("本轮 Cloudflare 盾未能通过", "WARN")
 
                         # 保存并发送拦截截图
                         screenshot_file = "cf_blocked.png"
@@ -476,10 +500,10 @@ def run_monitor():
                             log(f"已保存 Cloudflare 拦截页面截图: {screenshot_file}")
                             caption = (
                                 f"⚠️ <b>【NexioHost 监控 - Cloudflare 盾未通过】</b>\n\n"
-                                f"📄 <b>当前标题</b>: {html.escape(sb.get_title())}\n"
-                                f"🔗 <b>当前链接</b>: {html.escape(sb.get_current_url())}\n"
+                                f"📄 <b>当前标题</b>: {html.escape(sb.get_title() or 'None')}\n"
+                                f"🔗 <b>当前链接</b>: {html.escape(sb.get_current_url() or 'None')}\n"
                                 f"⏰ <b>检测时间</b>: {cn_time()}\n\n"
-                                f"<i>提示: 脚本已尝试 uc_gui_click_captcha 过盾未果，请查阅截图排查。</i>"
+                                f"<i>提示: 脚本已尝试 uc_gui_click_captcha 过盾未果，已捕获当前画面排查。</i>"
                             )
                             send_tg_photo(TG_BOT_TOKEN, TG_CHAT_ID, screenshot_file, caption)
                         except Exception as err:
