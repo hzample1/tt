@@ -252,45 +252,34 @@ def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
             ''')
             
             if rect:
-                # 使用 Selenium 原生的 ActionChains 进行偏移点击，这在虚拟桌面中比 PyAutoGUI 可靠得多
-                from selenium.webdriver.common.action_chains import ActionChains
+                import pyautogui
+                pyautogui.FAILSAFE = False  # 禁用角落防呆保护
                 
-                log(f"📍 找到 Turnstile 容器: {rect}")
+                # 按照 SeleniumBase 源码 _uc_gui_click_captcha 的标准方法计算真实的屏幕绝对坐标
+                window_rect = sb.driver.get_window_rect()
+                width = window_rect["width"]
+                height = window_rect["height"]
+                win_x = window_rect["x"]
+                win_y = window_rect["y"]
                 
-                # 尝试找到该容器的 DOM 元素
-                container = sb.driver.execute_script('''
-                    var widget = document.querySelector('input[name="cf-turnstile-response"]');
-                    if (widget) {
-                        var el = widget;
-                        while(el && el.tagName !== 'BODY') {
-                            var r = el.getBoundingClientRect();
-                            if(r.width > 50 && r.height > 50) {
-                                return el;
-                            }
-                            el = el.parentElement;
-                        }
-                    }
-                    return null;
-                ''')
+                inner_width = sb.execute_script("return window.innerWidth;")
+                inner_height = sb.execute_script("return window.innerHeight;")
                 
-                if container:
-                    # ActionChains 默认将鼠标移动到元素的正中心
-                    # 容器宽度大概是 896px，复选框在最左侧（约偏移左边缘 30px）
-                    # 因此，相对中心的 X 偏移量为：30 - (896 / 2) = 30 - 448 = -418
-                    # 为了更精确，我们动态计算：
-                    offset_x = 30 - (rect["width"] / 2.0)
-                    # Y轴方向复选框居中，所以 offset_y = 0
-                    offset_y = 0
-                    
-                    log(f"📍 准备使用 ActionChains 点击容器，中心偏移量: ({offset_x}, {offset_y})")
-                    
-                    actions = ActionChains(sb.driver)
-                    actions.move_to_element_with_offset(container, offset_x, offset_y)
-                    actions.click()
-                    actions.perform()
-                else:
-                    log("⚠️ 无法获取容器 DOM 元素，回退", "WARN")
-                    sb.uc_gui_click_captcha()
+                x_border = (width - inner_width) / 2.0
+                nav_top = height - inner_height - x_border
+                
+                # Turnstile 复选框通常在容器左侧，向右偏移约 30px，垂直偏移约 34px
+                client_x = rect["x"] + 30
+                client_y = rect["y"] + 34
+                
+                target_x = win_x + x_border + client_x
+                target_y = win_y + nav_top + client_y
+                
+                log(f"📍 窗口: ({win_x},{win_y}) {width}x{height}, 内部: {inner_width}x{inner_height}")
+                log(f"📍 计算得到复选框物理绝对坐标: ({target_x}, {target_y})")
+                
+                pyautogui.moveTo(target_x, target_y, duration=0.6)
+                pyautogui.click()
             else:
                 log("⚠️ 未能定位到 Turnstile 容器，回退到原生点击", "WARN")
                 sb.uc_gui_click_captcha()
