@@ -434,15 +434,17 @@ def run_monitor():
     # 2. 构建与 demo.py 一致的 SeleniumBase 参数，但强制启用有头模式！
     # 因为我们已经在后台启动了 Xvfb (虚拟显示器)，让 Chrome 以完全 GUI 模式运行
     # 是绕过严格等级 Cloudflare 盾（防止被识别为无头浏览器）的最关键一步
-    sb_kwargs = dict(
-        uc=True,
-        test=True,
-        locale="en",
-        headed=True, 
-        user_data_dir=None,
-        chromium_arg="--disable-blink-features=AutomationControlled",
-    )
+    sb_kwargs = {
+        "uc": True,
+        "headed": True,  # 强制 headed = True, 对抗无头检测
+        "incognito": True,
+        "locale_code": "en,en-US",
+        "agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    }
+
+    # 读取 PROXY_SERVER 环境变量并注入 SeleniumBase
     if PROXY_SERVER:
+        log(f"🔌 检测到代理配置: {PROXY_SERVER}，应用到浏览器...")
         sb_kwargs["proxy"] = PROXY_SERVER
 
     # 若虚拟桌面未通过 pyvirtualdisplay 启动，则回退启用 SB 内置 xvfb
