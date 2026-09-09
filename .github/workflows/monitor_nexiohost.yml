@@ -1,0 +1,57 @@
+name: NexioHost Free Bot 库存监控
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每 1 小时触发一次 (整点执行)，配合脚本内部持续约 59 分钟高频轮询，实现无缝平滑衔接
+    - cron: '0 * * * *'
+
+concurrency:
+  group: nexiohost-monitor
+  cancel-in-progress: true
+
+jobs:
+  monitor:
+    name: SeleniumBase UC 自动过盾监控
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装系统依赖与 Python 库
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          python -m pip install --upgrade pip
+          pip install seleniumbase requests beautifulsoup4
+
+      - name: 启动 Cloudflare WARP (优化出口 IP)
+        uses: fscarmen/warp-on-actions@v1.1
+
+      - name: 执行监控脚本
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          LOOP_INTERVAL: "20"
+          MAX_RUN_SECONDS: "3540"
+        run: |
+          python monitor_nexiohost.py
+
+      - name: 清理历史运行记录
+        if: always()
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          delete_workflow_pattern: ${{ github.workflow }}
+          retain_days: 1
+          keep_minimum_runs: 3
