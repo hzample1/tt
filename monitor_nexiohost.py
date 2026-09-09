@@ -251,6 +251,19 @@ def _try_click_cf(sb) -> bool:
     except Exception as e:
         log(f"  uc_gui_click_captcha 失败: {e}", "WARN")
 
+    # 方法 C: 原生 ActionChains 精准点击 (兼容高版本 Chrome, 不依赖 CDP)
+    try:
+        log("🖱️ 尝试原生 ActionChains 点击...")
+        iframe = sb.driver.find_element("xpath", "//iframe[contains(@src, 'challenges.cloudflare.com')]")
+        from selenium.webdriver.common.action_chains import ActionChains
+        actions = ActionChains(sb.driver)
+        actions.move_to_element_with_offset(iframe, 30, 30).click().perform()
+        time.sleep(7)
+        if is_product_page_ready(sb):
+            return True
+    except Exception as e:
+        log(f"  ActionChains 点击失败: {e}", "WARN")
+
     return False
 
 
