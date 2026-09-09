@@ -466,12 +466,14 @@ def run_monitor():
     # 1. 在 Linux 环境下启动 1920x1080 虚拟桌面 (demo.py 关键方案)
     display = setup_display()
 
-    # 2. 构建与 demo.py 一致的 SeleniumBase 参数
+    # 2. 构建与 demo.py 一致的 SeleniumBase 参数，但强制启用有头模式！
+    # 因为我们已经在后台启动了 Xvfb (虚拟显示器)，让 Chrome 以完全 GUI 模式运行
+    # 是绕过严格等级 Cloudflare 盾（防止被识别为无头浏览器）的最关键一步
     sb_kwargs = dict(
         uc=True,
         test=True,
         locale="en",
-        headed=not is_linux(),
+        headed=True, 
         user_data_dir=None,
         chromium_arg="--disable-blink-features=AutomationControlled",
     )
