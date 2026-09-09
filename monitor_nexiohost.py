@@ -223,101 +223,166 @@ def is_cloudflare_interstitial(sb) -> bool:
         return True
 
 
-def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
+def _try_click_cf(sb) -> bool:
     """
-    针对 billing.nexiohost.in 的 Cloudflare 整页盾绕过。
-
-    核心问题：SeleniumBase 的 uc_gui_click_captcha() 在找不到 Turnstile iframe 时
-    会回退到点击屏幕正中心。而该站点的 Turnstile 复选框偏左，导致每次都点空。
-
-    解决方案：先用 JS 定位复选框在 viewport 中的坐标，然后移动浏览器窗口，
-    使复选框恰好落在虚拟屏幕(1920x1080)的正中心。
-    之后调用 uc_gui_click_captcha()，它会：
+    尝试用多种方法点击 Cloudflare Turnstile 复选框。
+    SeleniumBase 的 uc_gui_click_cf / uc_gui_click_captcha 会在内部：
       1) 断开 WebDriver（使 navigator.webdriver=false）
-      2) 用 PyAutoGUI 点击屏幕中心（此时正好命中复选框）
+      2) 用 PyAutoGUI 点击
       3) 重新连接 WebDriver
     """
-    log("检测到 Cloudflare 整页盾，执行过盾流程...")
-
-    for attempt in range(max_attempts):
-        log(f"CF 盾绕过尝试 [{attempt + 1}/{max_attempts}]...")
-        try:
-            # 1. 定位 Turnstile 容器在 viewport 中的坐标
-            rect = sb.execute_script('''
-                var widget = document.querySelector('input[name="cf-turnstile-response"]');
-                if (widget) {
-                    var el = widget;
-                    while(el && el.tagName !== 'BODY') {
-                        var r = el.getBoundingClientRect();
-                        if(r.width > 50 && r.height > 50) {
-                            return {x: r.x, y: r.y, width: r.width, height: r.height};
-                        }
-                        el = el.parentElement;
-                    }
-                }
-                return null;
-            ''')
-
-            if rect:
-                # 2. 计算复选框在 viewport 中的中心点
-                checkbox_vp_x = rect["x"] + 30   # 复选框在容器左侧约30px处
-                checkbox_vp_y = rect["y"] + 34    # 垂直方向约34px处
-
-                # 3. 获取窗口与内容区的尺寸差（工具栏/边框的像素）
-                window_rect = sb.driver.get_window_rect()
-                w_width = window_rect["width"]
-                w_height = window_rect["height"]
-                inner_w = sb.execute_script("return window.innerWidth;")
-                inner_h = sb.execute_script("return window.innerHeight;")
-
-                x_border = (w_width - inner_w) / 2.0
-                nav_top = w_height - inner_h - x_border
-
-                # 4. 计算新的窗口位置，使复选框精确落在 1920x1080 屏幕的中心
-                screen_cx, screen_cy = 960, 540
-                new_x = int(screen_cx - x_border - checkbox_vp_x)
-                new_y = int(screen_cy - nav_top - checkbox_vp_y)
-
-                log(f"📍 Turnstile 容器: x={rect['x']}, y={rect['y']}, "
-                    f"w={rect['width']:.0f}, h={rect['height']:.0f}")
-                log(f"📍 复选框 viewport 坐标: ({checkbox_vp_x}, {checkbox_vp_y})")
-                log(f"📍 窗口边框: x_border={x_border}, nav_top={nav_top}")
-                log(f"📍 移动窗口到 ({new_x}, {new_y})，使复选框对准屏幕中心 (960, 540)")
-
-                sb.driver.set_window_position(new_x, new_y)
-                time.sleep(1)
-
-                # 5. 调用 SeleniumBase 原生方法（内部自动断开/重连 WebDriver）
-                log("🖱️ 调用 uc_gui_click_captcha() (窗口已重新定位)...")
-                sb.uc_gui_click_captcha()
-            else:
-                log("⚠️ 未能定位 Turnstile 容器，直接调用 uc_gui_click_captcha()", "WARN")
-                sb.uc_gui_click_captcha()
-
-            time.sleep(6)
-
-            if is_product_page_ready(sb):
-                log("✅ Cloudflare 挑战已通过，成功到达商品页面！")
-                return True
-        except Exception as e:
-            log(f"CF 绕过尝试 {attempt + 1} 失败: {e}", "WARN")
-        time.sleep(3)
-
-    log("3 次常规尝试未果，尝试通过 uc_open_with_reconnect 重新加载...")
+    # 方法 A: uc_gui_click_cf - 专门针对 Cloudflare Turnstile
     try:
-        sb.uc_open_with_reconnect(TARGET_URL, reconnect_time=10)
-        time.sleep(5)
+        log("🖱️ 尝试 uc_gui_click_cf()...")
+        sb.uc_gui_click_cf()
+        time.sleep(7)
         if is_product_page_ready(sb):
-            log("✅ 刷新后 Cloudflare 挑战已消失，成功进入商品页面！")
             return True
     except Exception as e:
-        log(f"刷新重连异常: {e}", "WARN")
+        log(f"  uc_gui_click_cf 失败: {e}", "WARN")
 
-    return is_product_page_ready(sb)
+    # 方法 B: uc_gui_click_captcha - 通用验证码点击
+    try:
+        log("🖱️ 尝试 uc_gui_click_captcha()...")
+        sb.uc_gui_click_captcha()
+        time.sleep(7)
+        if is_product_page_ready(sb):
+            return True
+    except Exception as e:
+        log(f"  uc_gui_click_captcha 失败: {e}", "WARN")
+
+    return False
+
+
+def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
+    """
+    多策略级联过盾：
+    策略 1: 最大化窗口（让 Turnstile 居中）→ 直接调用 uc_gui_click_cf
+    策略 2: 先访问首页获取 cf_clearance cookie → 再跳转商品页
+    策略 3: 精确窗口定位 → 使 Turnstile 对准屏幕中心 → uc_gui_click_captcha
+    """
+    log("检测到 Cloudflare 整页盾，执行多策略级联过盾流程...")
+
+    # ==================== 策略 1: 最大化窗口 ====================
+    # 在 1920x1080 的虚拟屏幕上最大化窗口后，Cloudflare 挑战页面的
+    # Turnstile 控件会更靠近屏幕中心，使默认的 click-center 更可能命中
+    for attempt in range(max_attempts):
+        log(f"📐 策略1: 最大化窗口 + uc_gui_click [尝试 {attempt + 1}/{max_attempts}]")
+        try:
+            sb.driver.maximize_window()
+            time.sleep(1)
+            if _try_click_cf(sb):
+                log("✅ 策略1成功！Cloudflare 挑战已通过！")
+                return True
+        except Exception as e:
+            log(f"策略1尝试 {attempt + 1} 异常: {e}", "WARN")
+        time.sleep(2)
+
+    # ==================== 策略 2: 首页过盾 + Cookie 继承 ====================
+    # cf_clearance cookie 对整个域名有效。如果能在首页过盾，
+    # 就能直接带着 cookie 访问商品页，完全跳过商品页的 CF 挑战
+    log("📐 策略2: 通过首页获取 cf_clearance cookie...")
+    try:
+        clear_browser_state(sb)
+        sb.uc_open_with_reconnect("https://billing.nexiohost.in/", reconnect_time=10)
+        time.sleep(4)
+
+        # 检查首页是否也有 CF 盾
+        homepage_has_cf = is_cloudflare_interstitial(sb)
+        if homepage_has_cf:
+            log("首页也存在 CF 盾，尝试在首页过盾...")
+            # 首页的 Turnstile 更可能居中，直接用默认方法
+            sb.driver.maximize_window()
+            time.sleep(1)
+            _try_click_cf(sb)
+            time.sleep(3)
+
+        # 无论首页是否过盾成功，尝试带着当前 cookie 访问商品页
+        log("携带当前 cookie 跳转商品页...")
+        sb.uc_open_with_reconnect(TARGET_URL, reconnect_time=8)
+        time.sleep(5)
+
+        if is_product_page_ready(sb):
+            log("✅ 策略2成功！通过首页 cookie 直接进入商品页！")
+            return True
+
+        # 商品页仍有盾，尝试在商品页上再过一次
+        if is_cloudflare_interstitial(sb):
+            log("商品页仍有 CF 盾，再次尝试点击...")
+            if _try_click_cf(sb):
+                log("✅ 策略2成功！在商品页再次点击后通过！")
+                return True
+    except Exception as e:
+        log(f"策略2异常: {e}", "WARN")
+
+    # ==================== 策略 3: 精确窗口定位 ====================
+    # 用 JS 定位 Turnstile 在 viewport 中的位置，然后移动窗口
+    # 使复选框恰好落在屏幕中心，再调用 uc_gui_click_captcha
+    log("📐 策略3: 精确窗口定位 + uc_gui_click_captcha...")
+    try:
+        # 重新访问目标页面
+        sb.uc_open_with_reconnect(TARGET_URL, reconnect_time=10)
+        time.sleep(5)
+
+        rect = sb.execute_script('''
+            var widget = document.querySelector('input[name="cf-turnstile-response"]');
+            if (widget) {
+                var el = widget;
+                while(el && el.tagName !== 'BODY') {
+                    var r = el.getBoundingClientRect();
+                    if(r.width > 50 && r.height > 50) {
+                        return {x: r.x, y: r.y, width: r.width, height: r.height};
+                    }
+                    el = el.parentElement;
+                }
+            }
+            // 尝试直接查找 iframe
+            var iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+            if (iframe) {
+                var ir = iframe.getBoundingClientRect();
+                return {x: ir.x, y: ir.y, width: ir.width, height: ir.height, isIframe: true};
+            }
+            return null;
+        ''')
+
+        if rect:
+            is_iframe = rect.get("isIframe", False)
+            if is_iframe:
+                # iframe 通常 300x65, 复选框在 (34, 33) 处
+                checkbox_vp_x = rect["x"] + 34
+                checkbox_vp_y = rect["y"] + 33
+            else:
+                checkbox_vp_x = rect["x"] + 30
+                checkbox_vp_y = rect["y"] + 34
+
+            window_rect = sb.driver.get_window_rect()
+            inner_w = sb.execute_script("return window.innerWidth;")
+            inner_h = sb.execute_script("return window.innerHeight;")
+            x_border = (window_rect["width"] - inner_w) / 2.0
+            nav_top = window_rect["height"] - inner_h - x_border
+
+            new_x = int(960 - x_border - checkbox_vp_x)
+            new_y = int(540 - nav_top - checkbox_vp_y)
+
+            log(f"📍 定位到{'iframe' if is_iframe else '容器'}: "
+                f"({rect['x']}, {rect['y']}) {rect['width']:.0f}x{rect['height']:.0f}")
+            log(f"📍 移动窗口到 ({new_x}, {new_y})，使复选框对准屏幕中心")
+
+            sb.driver.set_window_position(new_x, new_y)
+            time.sleep(1)
+
+            if _try_click_cf(sb):
+                log("✅ 策略3成功！精确定位后通过！")
+                return True
+    except Exception as e:
+        log(f"策略3异常: {e}", "WARN")
+
+    log("❌ 所有策略均未能通过 Cloudflare 盾", "ERROR")
+    return False
 
 
 def handle_initial_page(sb) -> bool:
-    """初始页面加载与过盾 (参考 demo.py handle_initial_page)"""
+    """初始页面加载与过盾"""
     clear_browser_state(sb)
 
     log(f"正在访问目标地址: {TARGET_URL} (reconnect_time=8s)...")
@@ -329,7 +394,7 @@ def handle_initial_page(sb) -> bool:
 
     if not is_product_page_ready(sb):
         log("检测到页面尚未呈现商品内容 (仍受 CF 盾拦截)，启动过盾流程...")
-        passed = bypass_cloudflare_interstitial(sb, max_attempts=3)
+        passed = bypass_cloudflare_interstitial(sb, max_attempts=2)
         if not passed:
             log("❌ Cloudflare 盾未能成功通过", "ERROR")
             return False
