@@ -235,7 +235,7 @@ def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
     for attempt in range(max_attempts):
         log(f"CF 盾绕过尝试 [{attempt + 1}/{max_attempts}]...")
         try:
-            # 1. 精确获取复选框坐标
+            # 1. 精确获取复选框所在的 client 坐标
             rect = sb.execute_script('''
                 var widget = document.querySelector('input[name="cf-turnstile-response"]');
                 if (widget) {
@@ -243,7 +243,7 @@ def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
                     while(el && el.tagName !== 'BODY') {
                         var r = el.getBoundingClientRect();
                         if(r.width > 50 && r.height > 50) {
-                            return {x: r.x, y: r.y};
+                            return {x: r.x, y: r.y, width: r.width, height: r.height};
                         }
                         el = el.parentElement;
                     }
@@ -253,19 +253,31 @@ def bypass_cloudflare_interstitial(sb, max_attempts: int = 3) -> bool:
             
             if rect:
                 import pyautogui
-                import sys
-                pyautogui.FAILSAFE = False  # 禁用角落防呆保护 (在无头/虚拟桌面环境下鼠标经常在 0,0)
+                pyautogui.FAILSAFE = False  # 禁用角落防呆保护
                 
+                # 按照 SeleniumBase 源码 _uc_gui_click_captcha 的标准方法计算真实的屏幕绝对坐标
                 window_rect = sb.driver.get_window_rect()
-                nav_y = 133 if "mac" in sys.platform.lower() or sys.platform == "darwin" else 88
-                if is_linux():
-                    nav_y = 74 # 常见的 Linux Xvfb 窗口头部高度估计
+                width = window_rect["width"]
+                height = window_rect["height"]
+                win_x = window_rect["x"]
+                win_y = window_rect["y"]
                 
-                # Turnstile 复选框通常在容器左侧 30px，垂直居中 34px
-                target_x = window_rect["x"] + rect["x"] + 30
-                target_y = window_rect["y"] + nav_y + rect["y"] + 34
+                inner_width = sb.execute_script("return window.innerWidth;")
+                inner_height = sb.execute_script("return window.innerHeight;")
                 
-                log(f"📍 计算得到复选框物理坐标: ({target_x}, {target_y})")
+                x_border = (width - inner_width) / 2.0
+                nav_top = height - inner_height - x_border
+                
+                # Turnstile 复选框通常在容器左侧，向右偏移约 30px，垂直偏移约 34px
+                client_x = rect["x"] + 30
+                client_y = rect["y"] + 34
+                
+                target_x = win_x + x_border + client_x
+                target_y = win_y + nav_top + client_y
+                
+                log(f"📍 窗口: ({win_x},{win_y}) {width}x{height}, 内部: {inner_width}x{inner_height}")
+                log(f"📍 计算得到复选框物理绝对坐标: ({target_x}, {target_y})")
+                
                 pyautogui.moveTo(target_x, target_y, duration=0.6)
                 pyautogui.click()
             else:
